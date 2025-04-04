@@ -1,0 +1,10 @@
+MetaTrader5
+pandas
+numpy
+pyodbc
+python-dotenv
+requests
+SQLAlchemy
+scikit-learn
+joblib
+python-telegram-bot 

@@ -1,0 +1,14 @@
+# Virtual environment
+venv/
+*.pyc
+__pycache__/
+
+# IDE files (optional)
+.idea/
+.vscode/
+
+# Log files directory
+logs/
+
+# Secrets file
+.env 
