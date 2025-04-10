@@ -7,4 +7,9 @@ requests
 SQLAlchemy
 scikit-learn
 joblib
-python-telegram-bot 
+python-telegram-bot
+pandas-ta
+tensorflow
+xgboost
+matplotlib
+seaborn

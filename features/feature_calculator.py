@@ -1,197 +1,109 @@
 # features/feature_calculator.py
+import logging
 import pandas as pd
 import numpy as np
-import logging
+import pandas_ta as ta # <<< Import pandas-ta
 
-# Get logger for this module
 logger = logging.getLogger(__name__)
-
-def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Calculates Relative Strength Index (RSI)."""
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-
-    # Use exponential moving average (EMA) for average gain/loss - common RSI variant
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-
-    # Prevent division by zero or very small numbers
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    # Ensure RSI is within 0-100 range (can sometimes slightly exceed due to precision)
-    rsi = rsi.clip(0, 100)
-    return rsi
-
-def calculate_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
-    """Calculates Moving Average Convergence Divergence (MACD)."""
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd = ema_fast - ema_slow
-    macd_signal = macd.ewm(span=signal, adjust=False).mean()
-    macd_hist = macd - macd_signal
-    # Return as DataFrame for easy column naming and concat
-    return pd.DataFrame({
-        f'macd_{fast}_{slow}': macd,
-        f'macd_signal_{signal}': macd_signal,
-        f'macd_hist_{signal}': macd_hist
-    })
-
-def calculate_bollinger_bands(series: pd.Series, period: int = 20, std_dev: int = 2) -> pd.DataFrame:
-    """Calculates Bollinger Bands."""
-    sma = series.rolling(window=period).mean()
-    std = series.rolling(window=period).std()
-    upper_band = sma + (std * float(std_dev))
-    lower_band = sma - (std * float(std_dev))
-    return pd.DataFrame({
-        f'bb_middle_{period}': sma,
-        f'bb_upper_{period}_{std_dev}': upper_band,
-        f'bb_lower_{period}_{std_dev}': lower_band
-    })
-
-def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Calculates Average True Range (ATR)."""
-    # Ensure inputs are numeric Series
-    high = pd.to_numeric(high, errors='coerce')
-    low = pd.to_numeric(low, errors='coerce')
-    close = pd.to_numeric(close, errors='coerce')
-
-    high_low = high - low
-    high_close_prev = np.abs(high - close.shift(1))
-    low_close_prev = np.abs(low - close.shift(1))
-
-    # Combine the three components to find the True Range (TR)
-    tr_df = pd.DataFrame({'hl': high_low, 'hc': high_close_prev, 'lc': low_close_prev})
-    true_range = tr_df.max(axis=1, skipna=False) # Ensure NaN propagation if inputs have NaNs
-
-    # Calculate ATR using Exponential Moving Average (common method)
-    atr = true_range.ewm(com=period - 1, min_periods=period).mean()
-    return atr
-
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame | None:
     """
-    Calculates various technical indicators and adds them as columns to the DataFrame.
+    Calculates technical features for the given DataFrame.
 
     Args:
-        df: Input DataFrame with 'time', 'open', 'high', 'low', 'close'. 'tick_volume' is optional.
+        df (pd.DataFrame): DataFrame with columns 'time', 'open', 'high', 'low', 'close'.
+                           'time' might be index or column.
 
     Returns:
-        DataFrame with added feature columns, or None if input is invalid or calculation fails.
-        Drops rows with NaN values resulting from initial indicator calculations.
+        pd.DataFrame | None: DataFrame with added features, or None if error.
     """
-    required_cols = ['time', 'open', 'high', 'low', 'close']
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        logger.warning("Feature Calculator: Received invalid or empty DataFrame.")
-        return None
-    if not all(col in df.columns for col in required_cols):
-        logger.warning(f"Feature Calculator: Input DataFrame missing required columns ({required_cols}). Found: {df.columns.tolist()}")
-        return None
-
     logger.debug(f"Calculating features for DataFrame with shape {df.shape}")
-    # Work on a copy to avoid modifying the original DataFrame passed to the function
-    df_features = df.copy()
+    required_cols = ['open', 'high', 'low', 'close']
+    # Check if 'time' is a column, if not, assume it's the index
+    if 'time' not in df.columns and df.index.name == 'time':
+         df_calc = df.reset_index() # Work with time as a column for safety
+         logger.debug("Time was index, reset for calculation.")
+    elif 'time' in df.columns:
+         df_calc = df.copy() # Work on a copy
+    else:
+         logger.error("Input DataFrame missing 'time' column or index.")
+         return None
+
+    if not all(col in df_calc.columns for col in required_cols):
+        logger.warning(f"Feature Calculator: Input DataFrame missing required columns ({required_cols}). Found: {df_calc.columns.tolist()}")
+        return None
 
     try:
-        # --- Ensure correct data types ---
-        for col in ['open', 'high', 'low', 'close']:
-            df_features[col] = pd.to_numeric(df_features[col], errors='coerce')
+        # Ensure 'time' is datetime type if it's a column
+        if 'time' in df_calc.columns:
+             df_calc['time'] = pd.to_datetime(df_calc['time'])
 
-        # Drop rows where OHLC conversion failed (should not happen with MT5 data)
-        df_features.dropna(subset=['open', 'high', 'low', 'close'], inplace=True)
-        if df_features.empty:
-             logger.warning("DataFrame empty after ensuring numeric OHLC columns.")
-             return None
+        # 1. Basic Price Features
+        df_calc['returns'] = df_calc['close'].pct_change()
+        df_calc['range'] = df_calc['high'] - df_calc['low']
+        df_calc['close_ratio'] = (df_calc['close'] - df_calc['low']) / (df_calc['high'] - df_calc['low']) # Normalize close within range
+        df_calc['close_ratio'] = df_calc['close_ratio'].fillna(0.5) # Handle bars with zero range
 
+        # 2. Standard Indicators (Using pandas_ta)
+        # RSI
+        df_calc.ta.rsi(length=14, append=True) # Appends 'RSI_14'
 
-        # --- Price derived features ---
-        df_features['returns'] = df_features['close'].pct_change()
-        df_features['log_returns'] = np.log(df_features['close'] / df_features['close'].shift(1)).fillna(0)
-        df_features['range'] = df_features['high'] - df_features['low']
-        # Close ratio within high-low range (handle zero range)
-        df_features['close_ratio'] = ((df_features['close'] - df_features['low']) /
-                                      df_features['range'].replace(0, 1e-10)).fillna(0.5).clip(0, 1)
+        # EMAs
+        df_calc.ta.ema(length=20, append=True) # Appends 'EMA_20'
+        df_calc.ta.ema(length=50, append=True) # Appends 'EMA_50'
 
-        # --- Moving Averages ---
-        df_features['sma_10'] = df_features['close'].rolling(window=10).mean()
-        df_features['ema_20'] = df_features['close'].ewm(span=20, adjust=False).mean()
-        df_features['ema_50'] = df_features['close'].ewm(span=50, adjust=False).mean()
+        # ATR
+        df_calc.ta.atr(length=14, append=True) # Appends 'ATRr_14' (note the 'r')
 
-        # --- Oscillators ---
-        df_features['rsi_14'] = calculate_rsi(df_features['close'], period=14)
-        macd_df = calculate_macd(df_features['close'])
-        df_features = pd.concat([df_features, macd_df], axis=1)
+        # --- NEW INDICATORS --- <<< ADDED HERE >>>
+        # Bollinger Bands (length 20, std dev 2)
+        # Appends: BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, BBB_20_2.0, BBP_20_2.0
+        logger.debug("Calculating Bollinger Bands...")
+        df_calc.ta.bbands(close='close', length=20, std=2, append=True)
 
-        # --- Volatility ---
-        df_features['atr_14'] = calculate_atr(df_features['high'], df_features['low'], df_features['close'], period=14)
-        bb_df = calculate_bollinger_bands(df_features['close'])
-        df_features = pd.concat([df_features, bb_df], axis=1)
+        # MACD (standard 12, 26, 9 periods)
+        # Appends: MACD_12_26_9, MACDh_12_26_9 (Histogram), MACDs_12_26_9 (Signal)
+        logger.debug("Calculating MACD...")
+        df_calc.ta.macd(close='close', fast=12, slow=26, signal=9, append=True)
+        # --- End New Indicators ---
 
-        # --- Example Trend Feature (EMA Cross Diff) ---
-        df_features['ema_diff'] = df_features['ema_20'] - df_features['ema_50']
+        # 3. Drop rows with NaN values created by indicator lookback periods
+        initial_len = len(df_calc)
+        df_calc.dropna(inplace=True)
+        final_len = len(df_calc)
+        logger.debug(f"Dropped {initial_len - final_len} rows with NaN values after feature calculation.")
 
-        # --- Example Momentum Feature (Rate of Change) ---
-        df_features['roc_10'] = df_features['close'].pct_change(periods=10) * 100 # As percentage
+        # Set time back as index if it was originally
+        if df.index.name == 'time':
+             df_calc = df_calc.set_index('time')
+             logger.debug("Set time back to index.")
 
-        # --- Time-based features (Example) ---
-        # df_features['hour'] = df_features['time'].dt.hour
-        # df_features['dayofweek'] = df_features['time'].dt.dayofweek # Monday=0
-
-        # --- Drop rows with NaN values ---
-        # This is crucial as indicators need lead-in periods.
-        initial_rows = len(df_features)
-        df_features.dropna(inplace=True)
-        rows_dropped = initial_rows - len(df_features)
-        if rows_dropped > 0:
-             logger.debug(f"Dropped {rows_dropped} rows with NaN values after feature calculation.")
-
-        if df_features.empty:
-             logger.warning("DataFrame became empty after dropping NaNs post-feature calculation.")
-             return None
-
-        logger.info(f"Features calculated successfully. Output shape: {df_features.shape}")
-        return df_features
+        logger.info(f"Features calculated successfully. Output shape: {df_calc.shape}")
+        return df_calc
 
     except Exception as e:
         logger.exception(f"An error occurred during feature calculation: {e}")
         return None
 
-
-# --- Example Usage Section (for testing this file directly) ---
+# --- Test Block ---
 if __name__ == '__main__':
-    # Basic logging setup for testing
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-
-    print("\n--- Testing Feature Calculation ---")
-    # Create a more realistic sample DataFrame
-    dates = pd.to_datetime(pd.date_range(start='2023-01-01', periods=100, freq='5min'))
-    close_prices = 1.1 + np.random.randn(100).cumsum() * 0.001
-    data = {
-        'time': dates,
-        'open': close_prices - np.random.rand(100) * 0.0005,
-        'high': close_prices + np.random.rand(100) * 0.001,
-        'low': close_prices - np.random.rand(100) * 0.001,
-        'close': close_prices,
-        'tick_volume': np.random.randint(10, 100, size=100)
-    }
-    # Ensure OHLC consistency
-    data['high'] = data[['high', 'open', 'close']].max(axis=1)
-    data['low'] = data[['low', 'open', 'close']].min(axis=1)
-
-    sample_df = pd.DataFrame(data)
-    print(f"Sample Input DataFrame shape: {sample_df.shape}")
-    print("Sample Input Tail:\n", sample_df.tail(3))
-
-    # Calculate features
-    features_result_df = calculate_features(sample_df)
-
-    if features_result_df is not None:
-        print(f"\nOutput DataFrame with Features shape: {features_result_df.shape}")
-        print("Output DataFrame Tail (showing calculated features):\n", features_result_df.tail(3))
-        # Check for NaNs (should be False after dropna)
-        print(f"\nAny NaN values remaining? {features_result_df.isnull().values.any()}")
-        # print("\nColumns:", features_result_df.columns.tolist()) # Uncomment to see all columns
+    # Example usage (requires a sample data CSV)
+    import os # Moved import here for standalone test
+    logging.basicConfig(level=logging.INFO) # Basic config for standalone test
+    logger.info("--- Testing Feature Calculator Standalone ---")
+    # Adjusted path assuming execution from G:\Alpha1.1\features
+    sample_data_path = 'G:\\Alpha1.1\\data\\EURUSD\\EURUSD_M5_2024-04-01_to_2025-04-02.csv' # Use one of your actual data files
+    if os.path.exists(sample_data_path):
+         df_raw = pd.read_csv(sample_data_path, parse_dates=['time'], index_col='time')
+         logger.info(f"Loaded sample data shape: {df_raw.shape}")
+         df_features = calculate_features(df_raw.head(200)) # Calculate on first 200 rows
+         if df_features is not None:
+             logger.info("Features calculated for sample data.")
+             print(df_features.tail())
+             print("\nColumns:")
+             print(df_features.columns.tolist())
+             logger.info(f"Final shape: {df_features.shape}")
+         else:
+             logger.error("Feature calculation failed for sample data.")
     else:
-        print("\nFeature calculation failed.")
-
-    print("\n--- Feature Calculation Test Complete ---") 
+         logger.warning(f"Sample data file not found at {sample_data_path}. Cannot run standalone test.")

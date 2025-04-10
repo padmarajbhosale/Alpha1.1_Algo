@@ -4,32 +4,63 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Shared state dictionary - stores current bot status
+# === Shared Bot State (Control Flags) ===
 bot_state = {
     "is_running": False,
     "is_paused": False,
     "mt5_connected": False,
     "last_error": None,
-    "close_all_requested": False, # <<< FLAG ADDED HERE
-    "bot_event_loop": None,       # Stores the asyncio loop for the bot thread
-    "telegram_bot_instance": None # Stores the telegram.Bot instance
-    # Add more state variables later
+    "close_all_requested": False,
+    "bot_event_loop": None,
+    "telegram_bot_instance": None
 }
 
-# Lock to ensure only one thread modifies the state at a time
 state_lock = threading.Lock()
 
-# Helper function to get state safely
 def get_state(key, default=None):
-    """Safely gets a value from the shared bot_state dictionary."""
-    # No need to acquire lock for simple dict read if GIL protects it enough?
-    # For safety/consistency, especially if dict grows complex, use lock.
     with state_lock:
         return bot_state.get(key, default)
 
-# Helper function to set state safely
 def set_state(key, value):
-    """Safely sets a value in the shared bot_state dictionary."""
     with state_lock:
-        # logger.debug(f"Updating state: {key} = {value}") # Can be noisy
         bot_state[key] = value
+
+def get_all_state():
+    with state_lock:
+        return dict(bot_state)
+
+# === Shared Feature State (Per Symbol) ===
+# This is updated in real-time by your data pipeline or MT5 fetch logic
+live_feature_state = {}
+feature_lock = threading.Lock()
+
+def update_symbol_features(symbol: str, features: dict):
+    with feature_lock:
+        live_feature_state[symbol] = features
+        logger.debug(f"🔄 Updated features for {symbol}: {features}")
+
+def get_latest_features(symbol: str):
+    with feature_lock:
+        return live_feature_state.get(symbol, {
+            'Regime': 0,            # Default to Ranging
+            'BOS_Signal': 0,
+            'OB_Present': 0,
+            'OB_Type_Encoded': 0
+        })
+
+def get_symbol_list():
+    # You can later fetch this dynamically from MT5 or config
+    return ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']
+
+def get_config():
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    return {
+        'model_path': os.getenv("MODEL_PATH"),
+        'scaler_path': os.getenv("SCALER_PATH"),
+        'meta_model_path': os.getenv("META_MODEL_PATH"),
+        'meta_scaler_path': os.getenv("META_SCALER_PATH"),
+        'telegram_token': os.getenv("TELEGRAM_BOT_TOKEN"),
+        'chat_id': os.getenv("ALERT_CHAT_ID"),
+    }
